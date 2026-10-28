@@ -12,8 +12,17 @@ const HOSTED_HINT =
   location.protocol === "https:" ? ` This page is hosted online, which browsers can block. Open ${LLAMA_URL} instead.` : "";
 const TIKZ_BASE = "http://127.0.0.1:3001";
 // TikZ libraries the model may use; passed to tikz-service on every diagram render.
-const TIKZ_LIBRARIES = "arrows.meta,positioning,shapes.geometric,calc";
+const TIKZ_LIBRARIES = "arrows.meta,positioning,shapes.geometric,calc,circuits.logic.US,circuits.ee.IEC";
 const MATH_PACKAGES = { amsmath: "", amssymb: "" };
+
+// circuitikz isn't available, but TikZ's own circuit libraries are; show the model the syntax.
+const CIRCUIT_HELP =
+  "circuitikz is NOT available. For logic gates use [circuit logic US] on the tikzpicture, e.g. " +
+  "\\node[and gate, draw, inputs=nn] (g1) at (2,1) {}; \\node[or gate, draw, inputs=nn] (g2) at (4,0) {}; " +
+  "(also not gate, nand gate, nor gate, xor gate) and wire them with \\draw (A) -- (g1.input 1); " +
+  "\\draw (g1.output) -- ++(0.5,0) |- (g2.input 1); \\draw (g2.output) -- ++(1,0) node[right] {Q}; " +
+  "For electrical circuits use [circuit ee IEC], e.g. \\draw (0,0) to [battery] (0,2) to [resistor={info=$4\\,\\Omega$}] (3,2) " +
+  "to [bulb] (3,0) -- (0,0); (also capacitor, ammeter, voltmeter, make contact for a switch). ";
 
 const NOTES_PROMPT =
   "You digitise photos of handwritten study notes. Read the page top to bottom and return it as JSON blocks in order, " +
@@ -30,8 +39,7 @@ const NOTES_PROMPT =
   "Draw each labelled shape as a named \\node (e.g. \\node[draw, circle] (sun) {Sun};), place nodes with " +
   "positioning (right=2cm of sun), and connect them with arrows between node names, e.g. \\draw[->] (sun) -- (leaf); " +
   "so lines never cross labels. Use plain black outlines, no fill colours. " +
-  "circuitikz is NOT available: draw circuit components from plain shapes (a small rectangle for a resistor, " +
-  "two short parallel lines for a battery, filled dots for nodes, straight lines for wires) and label them with nodes. " +
+  CIRCUIT_HELP +
   "Use only ASCII characters: write symbols as LaTeX (\\Omega, ^\\circ, \\mu, \\rightarrow), never as Unicode. " +
   "Never use % comments, \\documentclass, \\usepackage, \\usetikzlibrary, align or equation environments, " +
   "\\ce, \\SI or \\si. " +
@@ -68,7 +76,8 @@ const quizPrompt = (notes) =>
 const FIX_PROMPT =
   "You fix TikZ code so it compiles and draws visibly. Keep the drawing the same. Reply with only the corrected complete " +
   `tikzpicture in a \`\`\`latex code block. Only these libraries are loaded: ${TIKZ_LIBRARIES}. ` +
-  "circuitikz is not available, so draw components from plain shapes. Use black lines, only ASCII characters, " +
+  CIRCUIT_HELP +
+  "Never return an empty tikzpicture. Use black lines, only ASCII characters, " +
   "and never % comments.";
 const MATH_FIX_PROMPT =
   "You fix a LaTeX maths expression so it compiles inside $\\displaystyle ...$ with only amsmath and amssymb. " +
@@ -364,7 +373,10 @@ function cleanTikz(s) {
   const fenced = s.match(/```[\w-]*\n([\s\S]*?)```/);
   let tikz = (fenced ? fenced[1] : s).replace(/(^|[^\\])%[^\n\\]*/g, "$1");
   const picture = tikz.match(/\\begin\{tikzpicture\}[\s\S]*\\end\{tikzpicture\}/);
+  const opened = tikz.match(/\\begin\{tikzpicture\}[\s\S]*/);
   if (picture) tikz = picture[0];
+  // cut off before \end: close it rather than nesting it inside another tikzpicture
+  else if (opened) tikz = `${opened[0]}\n\\end{tikzpicture}`;
   else tikz = `\\begin{tikzpicture}\n${tikz}\n\\end{tikzpicture}`;
   return texSafe(tikz.trim(), "text");
 }
@@ -550,14 +562,26 @@ async function renderTikz(tikz, extra = {}) {
   return sanitizeSvg(body.svg);
 }
 
-// Ask Gemma (text only, no image) to fix a diagram TeX rejected.
-async function fixTikz(tikz, error) {
+// Ask Gemma to fix a diagram TeX rejected (or that came out empty). It gets the photo too,
+// so it can redraw from the page when the code it's given has nothing to fix.
+async function fixTikz(tikz, error, images, label) {
   let raw = "";
   await streamReply(
     {
       messages: [
         { role: "system", content: FIX_PROMPT },
-        { role: "user", content: `This TikZ failed to compile:\n\`\`\`latex\n${tikz}\n\`\`\`\nError: ${error}` },
+        {
+          role: "user",
+          content: [
+            ...images.map((url) => ({ type: "image_url", image_url: { url } })),
+            {
+              type: "text",
+              text:
+                `This TikZ for ${label} on the page in the photo failed:\n\`\`\`latex\n${tikz}\n\`\`\`\nError: ${error}\n` +
+                "If it is empty or incomplete, redraw that diagram from the photo.",
+            },
+          ],
+        },
       ],
       temperature: 0.2,
       max_tokens: 2048,
@@ -607,13 +631,21 @@ function failRunning(msg, error) {
   for (const s of msg.trace || []) if (s.status === "running") endStep(s, { output: error }, "error");
 }
 
+// True when a diagram has nothing between \begin{tikzpicture} and \end{tikzpicture} (or an equation is empty).
+function isBlank(content, isMath) {
+  const body = isMath ? content : content.replace(/\\(begin|end)\{tikzpicture\}(\[[^\]]*\])?/g, "");
+  return !body.trim();
+}
+
 // Typeset one maths/diagram block, with a Gemma fix attempt when TeX rejects it.
-async function typesetBlock(block, msg, update, label) {
+async function typesetBlock(block, msg, update, label, images) {
   const isMath = block.type === "math";
   for (let attempt = 0; ; attempt++) {
     const tikz = isMath ? mathToTikz(block.content) : block.content;
     const step = startStep(msg, { label: `Typeset ${label}`, tool: TEX_TOOL, input: tikz }, update);
     try {
+      // an empty picture "compiles" to nothing, so send it straight to the fix step
+      if (isBlank(block.content, isMath)) throw new CompileError("The diagram is empty");
       block.svg = await renderTikz(
         tikz,
         isMath ? { texPackages: MATH_PACKAGES } : { tikzLibraries: TIKZ_LIBRARIES, texPackages: MATH_PACKAGES },
@@ -632,8 +664,14 @@ async function typesetBlock(block, msg, update, label) {
       }
       const fix = startStep(msg, { label: `Fix ${label} after TeX error`, tool: GEMMA_TOOL, input: err.message }, update);
       try {
-        block.content = isMath ? await fixMath(block.content, err.message) : await fixTikz(block.content, err.message);
-        endStep(fix, { output: block.content });
+        const fixed = isMath ? await fixMath(block.content, err.message) : await fixTikz(block.content, err.message, images, label);
+        endStep(fix, { output: fixed });
+        // An empty reply would replace the code with nothing; keep what we had so it can still be shown.
+        if (isBlank(fixed, isMath)) {
+          block.error = isMath ? "Couldn't typeset this equation, showing the LaTeX:" : "Couldn't draw this diagram, showing the TikZ:";
+          return;
+        }
+        block.content = fixed;
       } catch (fixErr) {
         endStep(fix, { output: fixErr.message }, "error");
         block.error = gemmaError(fixErr);
@@ -737,7 +775,7 @@ async function sendFiles(fileList) {
     const seen = { math: 0, diagram: 0 };
     for (const block of toTypeset) {
       const n = ++seen[block.type];
-      await typesetBlock(block, reply, update, `${block.type === "math" ? "equation" : "diagram"} ${n}`);
+      await typesetBlock(block, reply, update, `${block.type === "math" ? "equation" : "diagram"} ${n}`, images);
       update();
     }
     reply.stage = "done";
