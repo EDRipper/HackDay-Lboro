@@ -2,8 +2,14 @@
 //   photo --(Gemma in llama-server)--> TikZ --(tikz-service, TeX in WebAssembly)--> SVG
 // Threads live in memory only.
 
-// Served by llama-server itself -> same origin. Opened any other way -> talk to the local server.
-const API_BASE = ["127.0.0.1", "localhost"].includes(location.hostname) ? "" : "http://127.0.0.1:8080";
+// Served by llama-server itself (port 8080) -> same origin. Opened any other way
+// (file://, another dev server, Vercel) -> talk to the local server directly.
+const LLAMA_URL = "http://127.0.0.1:8080";
+const ON_LLAMA_SERVER = ["127.0.0.1", "localhost"].includes(location.hostname) && location.port === "8080";
+const API_BASE = ON_LLAMA_SERVER ? "" : LLAMA_URL;
+// Browsers often block public https pages from calling services on this laptop.
+const HOSTED_HINT =
+  location.protocol === "https:" ? ` This page is hosted online, which browsers can block. Open ${LLAMA_URL} instead.` : "";
 const TIKZ_BASE = "http://127.0.0.1:3001";
 // TikZ libraries the model may use; passed to tikz-service on every render.
 const TIKZ_LIBRARIES = "arrows.meta,positioning,shapes.geometric,calc";
@@ -317,7 +323,7 @@ async function renderTikz(tikz) {
       body: JSON.stringify({ tikz, tikzLibraries: TIKZ_LIBRARIES }),
     });
   } catch {
-    throw new Error("Couldn't reach the TikZ renderer. Is it running (scripts\start.ps1)?");
+    throw new Error(`Couldn't reach the TikZ renderer. Is it running (scripts\\start.ps1)?${HOSTED_HINT}`);
   }
   const body = await res.json().catch(() => ({}));
   if (res.status === 422) throw new CompileError(body.error || "TikZ failed to compile");
@@ -389,7 +395,7 @@ async function sendFiles(fileList) {
         ? `TeX couldn't compile Gemma's TikZ: ${err.message}`
         : err.message.startsWith("Couldn't reach")
           ? err.message
-          : `Couldn't reach Gemma. Is the local server running (scripts\start.ps1)? ${err.message}`;
+          : `Couldn't reach Gemma. Is the local server running (scripts\\start.ps1)? (${err.message})${HOSTED_HINT}`;
   }
   thread.busy = false;
   render();
