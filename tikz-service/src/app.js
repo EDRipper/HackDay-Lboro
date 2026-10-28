@@ -6,6 +6,13 @@ const LIBRARY_PATTERN = /^[\w.\-, ]*$/;
 
 export function createApp() {
   const app = express();
+  // The web UI is served from llama-server on another port, so allow cross-origin calls.
+  app.use((req, res, next) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Headers', 'content-type, accept');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
   app.use(express.json({ limit: '100kb' }));
   // Also accept raw TikZ posted as text/plain.
   app.use(express.text({ type: ['text/plain', 'application/x-tex'], limit: '100kb' }));

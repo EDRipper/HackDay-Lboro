@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HackDay Chat</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Computer Modern fonts used by text inside the TeX-rendered SVGs (bundled for offline use) -->
+  <link rel="stylesheet" href="assets/tikz-fonts/fonts.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <img class="logo-lboro" src="assets/logos/lboro.svg" alt="Loughborough University">
+      </div>
+      <button class="new-thread" id="newThread">+ New thread</button>
+      <nav class="threads" id="threads"></nav>
+      <div class="sidebar-footer">
+        <span>Digitech Hackathon with</span>
+        <img class="logo-mlh" src="assets/logos/mlh-logo-white.svg" alt="Major League Hacking">
+      </div>
+    </aside>
+
+    <main class="chat" id="chat">
+      <!-- Sits over the empty-state slot, then shrinks into the header corner once a thread starts -->
+      <img class="logo-mlh-color" id="mlhLogo" src="assets/logos/mlh-logo-color.svg" alt="Major League Hacking">
+      <header class="chat-header">
+        <button class="icon-btn menu" id="menuBtn" aria-label="Toggle threads">&#9776;</button>
+        <h1 id="threadTitle">New thread</h1>
+      </header>
+
+      <section class="messages" id="messages">
+        <div class="empty" id="empty">
+          <div class="logo-slot" id="logoSlot"></div>
+          <h2>Start hacking</h2>
+          <p>Drop a photo of a hand-drawn diagram and get a clean digital version.</p>
+        </div>
+      </section>
+
+      <div class="composer">
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" accept="image/*" multiple hidden>
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+          <span class="dropzone-text" id="dropzoneText"><strong>Drop a hand-drawn diagram</strong> or click to browse</span>
+        </label>
+      </div>
+
+      <div class="drop-overlay" aria-hidden="true"><span>Drop to digitise</span></div>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

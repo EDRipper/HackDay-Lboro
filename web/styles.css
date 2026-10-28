@@ -1,0 +1,325 @@
+/* Bundled locally so the page works offline */
+@font-face {
+  font-family: "Nunito Sans";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("assets/fonts/nunito-sans-latin.woff2") format("woff2");
+}
+
+/* Airport Mono is a commercial font: drop a licensed airport-mono.woff2 into
+   assets/fonts and it takes over. Until then IBM Plex Mono (free, OFL) is used. */
+@font-face {
+  font-family: "Airport Mono";
+  src: local("Airport Mono"), url("assets/fonts/airport-mono.woff2") format("woff2");
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("assets/fonts/ibm-plex-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 600;
+  font-display: swap;
+  src: url("assets/fonts/ibm-plex-mono-600.woff2") format("woff2");
+}
+
+/* Loughborough University palette, taken from lboro.ac.uk */
+:root {
+  --lboro-purple: #361163;
+  --lboro-purple-light: #6f3092;
+  --lboro-magenta: #b70062;
+  --lboro-pink: #ed2482;
+  --bg: #f6f7f7;
+  --panel: #ffffff;
+  --sidebar: var(--lboro-purple);
+  --sidebar-hover: #4a1f7d;
+  --text: #1b1b1b;
+  --muted: #525e66;
+  --border: #cbcece;
+  --radius: 14px;
+  --mono: "Airport Mono", "IBM Plex Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: "Nunito Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+button, input { font: inherit; }
+
+.app { display: flex; height: 100vh; height: 100dvh; }
+
+/* Sidebar */
+.sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  background: var(--sidebar);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 14px;
+  gap: 16px;
+}
+.brand { padding: 4px 6px; }
+.logo-lboro { display: block; width: 180px; height: auto; }
+
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 6px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  color: #cdbfe0;
+  font-size: 12px;
+}
+.logo-mlh { height: 26px; width: auto; }
+
+.new-thread {
+  background: var(--lboro-magenta);
+  color: #fff;
+  border: 0;
+  border-radius: 10px;
+  padding: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.new-thread:hover { filter: brightness(1.08); }
+
+.threads { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.thread {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-left: 3px solid transparent;
+  color: #ddd2ec;
+  padding: 6px 6px 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  min-height: 40px;
+}
+.thread:hover { background: var(--sidebar-hover); color: #fff; }
+.thread.active { background: var(--sidebar-hover); color: #fff; border-left-color: var(--lboro-pink); }
+.thread-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rename {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: #cdbfe0;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+}
+.thread:hover .rename, .thread.active .rename, .rename:focus-visible { opacity: 1; }
+.rename:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--lboro-pink);
+  border-radius: 6px;
+  padding: 4px 8px;
+  outline: 0;
+}
+.chat-header .rename-input { background: var(--bg); border-color: var(--lboro-purple); font-weight: 700; font-size: 16px; }
+.chat-header h1 { cursor: text; }
+
+/* Touch screens have no hover, so always show the rename button */
+@media (hover: none) { .rename { opacity: 1; } }
+
+/* Chat */
+.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.chat-header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+/* MLH logo is positioned by placeLogo() in app.js; these transitions do the fly-up */
+.chat { position: relative; }
+.logo-slot { width: 140px; aspect-ratio: 310.59 / 130.78; }
+.logo-mlh-color {
+  position: absolute;
+  z-index: 5;
+  height: auto;
+  pointer-events: none;
+}
+.logo-mlh-color.animate {
+  transition: left 0.6s cubic-bezier(0.65, 0, 0.35, 1), top 0.6s cubic-bezier(0.65, 0, 0.35, 1), width 0.6s cubic-bezier(0.65, 0, 0.35, 1);
+}
+.empty h2 { color: var(--lboro-purple); margin: 18px 0 4px; font-weight: 800; }
+.empty p { margin: 0; }
+
+.msg {
+  max-width: min(680px, 85%);
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.msg.user { align-self: flex-end; background: var(--lboro-purple); color: #fff; border-bottom-right-radius: 4px; }
+.msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.msg.error { background: #fdecef; border-color: #a70531; color: #a70531; }
+.msg pre {
+  background: #1b1b1b;
+  color: #f6f7f7;
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 8px 0;
+}
+.msg code { font-family: var(--mono); font-size: 0.9em; }
+.msg :not(pre) > code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+.msg.user :not(pre) > code { background: rgba(255, 255, 255, 0.15); }
+
+/* Three-dot typing indicator while waiting for the first token */
+.typing { display: inline-flex; gap: 4px; padding: 4px 0; }
+.typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--lboro-purple-light); animation: blink 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay: 0.2s; }
+.typing i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+
+.msg img { display: block; max-width: min(360px, 100%); max-height: 360px; border-radius: 8px; }
+/* User messages are images only: a thin purple frame around them */
+.msg.user { padding: 6px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+/* No % max-width here: it can't resolve inside a shrink-to-fit bubble and stretches the frame */
+.msg.user img { border-radius: 10px; max-width: min(360px, 70vw); }
+
+/* Assistant output: progress line, live TikZ while streaming, then the rendered diagram */
+.msg.assistant { width: min(680px, 85%); white-space: normal; }
+.stage { display: flex; align-items: center; gap: 10px; color: var(--muted); font-weight: 600; }
+.stage.failed { color: #a70531; }
+.msg pre.tikz-live, .diagram-actions pre {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 12px;
+  margin: 10px 0 0;
+}
+.diagram {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px;
+  display: grid;
+  place-items: center;
+}
+/* SVG has its width/height stripped, so it scales from its viewBox */
+.diagram svg { width: 100%; height: auto; max-height: 480px; }
+.diagram-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.diagram-actions button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--lboro-purple);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.diagram-actions button:hover { border-color: var(--lboro-purple-light); }
+.diagram-actions details { flex-basis: 100%; }
+.diagram-actions summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
+
+/* Composer: image drop zone */
+.composer { padding: 12px 24px 20px; }
+.dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: min(760px, 100%);
+  height: 96px;
+  margin: 0 auto;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.dropzone strong { color: var(--lboro-magenta); }
+.dropzone:hover, .chat.dragging .dropzone { border-color: var(--lboro-purple-light); color: var(--lboro-purple); }
+.dropzone.busy { cursor: progress; border-style: solid; pointer-events: none; }
+.dropzone.busy svg { animation: blink 1.2s infinite; }
+
+/* Shown over the whole chat area while a file is dragged over it */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  background: rgba(54, 17, 99, 0.82);
+  border: 3px dashed var(--lboro-pink);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 22px;
+  font-weight: 800;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.chat.dragging .drop-overlay { opacity: 1; }
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.icon-btn:hover { background: var(--bg); color: var(--lboro-purple); }
+.menu { display: none; }
+
+/* Mobile: sidebar slides over the chat */
+@media (max-width: 760px) {
+  .menu { display: grid; }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 10;
+    transform: translateX(-100%);
+    transition: transform 0.2s;
+  }
+  .sidebar.open { transform: none; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.4); }
+  .messages, .composer { padding-left: 16px; padding-right: 16px; }
+  .chat-header { padding: 12px 16px; }
+}
