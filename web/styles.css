@@ -52,7 +52,7 @@ body {
   background: var(--bg);
   color: var(--text);
 }
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 
 .app { display: flex; height: 100vh; height: 100dvh; }
 
@@ -214,55 +214,159 @@ button, input { font: inherit; }
 @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
 
 .msg img { display: block; max-width: min(360px, 100%); max-height: 360px; border-radius: 8px; }
-/* User messages are images only: a thin purple frame around them */
-.msg.user { padding: 6px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+/* Uploaded photos: a thin purple frame around them (typed quiz answers keep normal padding) */
+.msg.user:has(img) { padding: 6px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 /* No % max-width here: it can't resolve inside a shrink-to-fit bubble and stretches the frame */
 .msg.user img { border-radius: 10px; max-width: min(360px, 70vw); }
 
-/* Assistant output: progress line, live TikZ while streaming, then the rendered diagram */
-.msg.assistant { width: min(680px, 85%); white-space: normal; }
+/* Assistant output */
+.msg.assistant { white-space: normal; }
+.msg.assistant.msg-notes { width: min(760px, 92%); max-width: none; }
 .stage { display: flex; align-items: center; gap: 10px; color: var(--muted); font-weight: 600; }
 .stage.failed { color: #a70531; }
-.msg pre.tikz-live, .diagram-actions pre {
-  max-height: 220px;
-  overflow: auto;
-  font-size: 12px;
-  margin: 10px 0 0;
+
+/* Pipeline panel: the chain of tool calls behind a reply */
+.trace {
+  margin: -2px 0 10px;
+  border: 1px solid #e3dcef;
+  border-radius: 10px;
+  background: #faf8fd;
+  font-size: 13px;
 }
-.diagram {
+.trace > summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-weight: 600;
+  list-style-position: inside;
+}
+.trace-title { color: var(--lboro-purple); font-weight: 800; margin-right: 4px; }
+.trace ol { list-style: none; margin: 0; padding: 0 10px 10px; }
+.step { position: relative; padding-left: 22px; }
+/* vertical connector between steps */
+.step::before { content: ""; position: absolute; left: 7px; top: 22px; bottom: -4px; width: 2px; background: #e3dcef; }
+.step:last-child::before { display: none; }
+.step > details > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 6px 4px;
+  cursor: pointer;
+  list-style: none;
+}
+.step > details > summary::-webkit-details-marker { display: none; }
+.step-dot { position: absolute; left: 2px; top: 11px; width: 12px; height: 12px; border-radius: 50%; background: #008466; }
+.step.running .step-dot { background: #e77e1d; animation: blink 1.2s infinite; }
+.step.error .step-dot { background: #a70531; }
+.step-num { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.step-label { font-weight: 700; color: var(--text); }
+.step-tool {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--lboro-purple);
+  background: #efe9f7;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.step-time { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.step.error .step-time { color: #a70531; }
+.step-io { margin: 4px 0 2px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.step pre { margin: 0 0 8px; max-height: 240px; overflow: auto; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; }
+
+/* Digitised notes: a clean "page" */
+.notes {
   background: #fff;
-  border-radius: 8px;
-  padding: 16px;
-  display: grid;
-  place-items: center;
+  border-radius: 10px;
+  padding: 24px 28px;
+  margin-top: 10px;
+  line-height: 1.6;
 }
-/* SVG has its width/height stripped, so it scales from its viewBox */
-.diagram svg { width: 100%; height: auto; max-height: 480px; }
-.diagram-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-.diagram-actions button {
+.stage + .notes { margin-top: 12px; }
+.notes h2 { margin: 0 0 12px; font-size: 22px; color: var(--lboro-purple); }
+.notes h3 { margin: 18px 0 6px; font-size: 17px; color: var(--lboro-purple); }
+.notes p { margin: 0 0 10px; }
+.notes ul { margin: 0 0 10px; padding-left: 22px; }
+.notes li { margin: 2px 0; }
+.math-inline { font-family: cmmi10, "Cambria Math", serif; font-size: 1.08em; }
+.math-block, .notes .diagram { margin: 12px 0; display: grid; place-items: center; }
+/* SVGs have width/height stripped: they scale from their viewBox, capped in sanitizeSvg() */
+.math-block svg, .notes .diagram svg { width: 100%; height: auto; max-height: 420px; }
+.notes .diagram { padding: 8px; border: 1px solid #ecebf2; border-radius: 8px; }
+.notes .pending { color: var(--muted); font-style: italic; padding: 12px; }
+.notes .failed { place-items: stretch; color: #a70531; font-size: 14px; }
+.notes .failed p { margin: 0 0 6px; }
+.notes .failed pre { max-height: 200px; overflow: auto; font-size: 12px; margin: 0; }
+
+.notes-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.notes-actions span { color: var(--muted); font-weight: 600; margin-right: auto; }
+.notes-actions button {
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--lboro-purple);
   font-weight: 700;
-  font-size: 13px;
-  padding: 6px 12px;
+  font-size: 14px;
+  padding: 8px 14px;
   border-radius: 8px;
   cursor: pointer;
 }
-.diagram-actions button:hover { border-color: var(--lboro-purple-light); }
-.diagram-actions details { flex-basis: 100%; }
-.diagram-actions summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
+.notes-actions button:hover { border-color: var(--lboro-purple-light); }
+.notes-actions button.primary { background: var(--lboro-magenta); border-color: var(--lboro-magenta); color: #fff; }
+.notes-actions button.primary:hover { filter: brightness(1.1); }
+
+/* Quiz answer box (replaces the upload row while quizzing) */
+.quiz-row textarea {
+  flex: 1;
+  min-width: 0;
+  height: 72px;
+  resize: none;
+  padding: 12px 14px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: inherit;
+  font-family: var(--mono);
+  font-size: 15px;
+  outline: 0;
+}
+.quiz-row textarea:focus { border-color: var(--lboro-purple); }
+.answer-send {
+  width: 96px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--lboro-magenta);
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+.answer-send:disabled, .quiz-row textarea:disabled { opacity: 0.55; cursor: progress; }
+.quiz-hint {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: min(760px, 100%);
+  margin: 6px auto 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.end-quiz { border: 0; background: none; color: var(--lboro-magenta); font-weight: 700; font-size: 12px; cursor: pointer; }
+.end-quiz:hover { text-decoration: underline; }
 
 /* Composer: image drop zone */
 .composer { padding: 12px 24px 20px; }
+.composer-row { display: flex; gap: 10px; width: min(760px, 100%); margin: 0 auto; }
 .dropzone {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  width: min(760px, 100%);
+  flex: 1;
+  min-width: 0;
   height: 96px;
-  margin: 0 auto;
+  padding: 0 12px;
+  text-align: center;
   border: 2px dashed var(--border);
   border-radius: var(--radius);
   background: var(--panel);
@@ -274,6 +378,64 @@ button, input { font: inherit; }
 .dropzone:hover, .chat.dragging .dropzone { border-color: var(--lboro-purple-light); color: var(--lboro-purple); }
 .dropzone.busy { cursor: progress; border-style: solid; pointer-events: none; }
 .dropzone.busy svg { animation: blink 1.2s infinite; }
+
+/* Camera button beside the drop zone */
+.camera-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 96px;
+  height: 96px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--lboro-magenta);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.camera-btn:hover { filter: brightness(1.1); }
+.camera-btn:disabled { opacity: 0.5; cursor: progress; }
+
+/* Camera preview dialog */
+.camera-dialog {
+  width: min(720px, calc(100vw - 32px));
+  padding: 0;
+  border: 0;
+  border-radius: 16px;
+  background: #111;
+  color: #fff;
+  overflow: hidden;
+}
+.camera-dialog::backdrop { background: rgba(27, 10, 50, 0.75); }
+.camera-dialog video { display: block; width: 100%; max-height: 70vh; background: #000; object-fit: contain; }
+.camera-error { margin: 0; padding: 24px; text-align: center; }
+.camera-controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 14px 18px; gap: 12px; }
+.camera-controls .camera-secondary:first-child { justify-self: start; }
+.camera-controls .camera-secondary:last-child { justify-self: end; }
+.camera-secondary {
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: none;
+  color: #fff;
+  font-weight: 700;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.camera-secondary[hidden] { display: none !important; }
+.camera-shutter {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 4px solid #fff;
+  background: var(--lboro-magenta);
+  box-shadow: inset 0 0 0 3px #111;
+  cursor: pointer;
+}
+.camera-shutter:hover { filter: brightness(1.15); }
 
 /* Shown over the whole chat area while a file is dragged over it */
 .drop-overlay {

@@ -1,6 +1,6 @@
-// Hand-drawn diagram -> clean digital version, all running locally:
-//   photo --(Gemma in llama-server)--> TikZ --(tikz-service, TeX in WebAssembly)--> SVG
-// Threads live in memory only.
+// Photo of handwritten notes -> clean digital notes, all running locally:
+//   photo --(Gemma OCR, llama-server)--> JSON blocks --(tikz-service, TeX in WebAssembly)--> rendered notes
+// Gemma can then quiz you on the notes, with typed answers. Threads live in memory only.
 
 // Served by llama-server itself (port 8080) -> same origin. Opened any other way
 // (file://, another dev server, Vercel) -> talk to the local server directly.
@@ -11,20 +11,62 @@ const API_BASE = ON_LLAMA_SERVER ? "" : LLAMA_URL;
 const HOSTED_HINT =
   location.protocol === "https:" ? ` This page is hosted online, which browsers can block. Open ${LLAMA_URL} instead.` : "";
 const TIKZ_BASE = "http://127.0.0.1:3001";
-// TikZ libraries the model may use; passed to tikz-service on every render.
+// TikZ libraries the model may use; passed to tikz-service on every diagram render.
 const TIKZ_LIBRARIES = "arrows.meta,positioning,shapes.geometric,calc";
-const SYSTEM_PROMPT =
-  "You convert photos of hand-drawn diagrams into clean TikZ code. Reproduce the diagram faithfully: " +
-  "the same shapes, nodes, arrows, connections and relative layout, and transcribe every label exactly as written. " +
-  "Do not add, remove or invent elements. If a label is unreadable, use a short placeholder like '?'. " +
-  "Reply with only one complete \\begin{tikzpicture} ... \\end{tikzpicture} block in a ```latex code block, " +
-  "with no explanation. Use standard TikZ plus only these libraries, which are already loaded: " +
-  `${TIKZ_LIBRARIES}. Do not write \\documentclass, \\usepackage or \\usetikzlibrary. ` +
-  "Keep labels as plain text or simple $math$.";
-// Input is images only, so this is the instruction sent alongside every image.
-const IMAGE_PROMPT = "Convert this hand-drawn diagram to TikZ.";
+const MATH_PACKAGES = { amsmath: "", amssymb: "" };
+
+const NOTES_PROMPT =
+  "You digitise photos of handwritten study notes. Read the page top to bottom and return it as JSON blocks in order, " +
+  "keeping the text separate from the diagrams. Block types: " +
+  '"heading" (a title or section heading), "paragraph" (running text), ' +
+  '"list" (bullet or numbered points: one item per line, without the bullet characters), ' +
+  '"math" (a displayed equation, as LaTeX without $ delimiters), ' +
+  '"diagram" (a drawing, as one complete \\begin{tikzpicture} ... \\end{tikzpicture}). ' +
+  "Transcribe the text exactly as written, fixing only obvious spelling slips. Do not add, summarise or invent content. " +
+  "Write maths inside text as $...$. If something is unreadable, write [unreadable]. " +
+  "In maths, write proper LaTeX: \\rightarrow for arrows, subscripts for numbers in chemical formulas " +
+  "(e.g. \\mathrm{CO_2}), \\times, \\frac and so on. " +
+  `For diagrams use standard TikZ plus only these libraries, which are already loaded: ${TIKZ_LIBRARIES}. ` +
+  "Draw each labelled shape as a named \\node (e.g. \\node[draw, circle] (sun) {Sun};), place nodes with " +
+  "positioning (right=2cm of sun), and connect them with arrows between node names, e.g. \\draw[->] (sun) -- (leaf); " +
+  "so lines never cross labels. Use plain outlines, no fill colours. " +
+  "Never use % comments, \\documentclass, \\usepackage or \\usetikzlibrary. " +
+  'Set "title" to a short title for the page.';
+const NOTES_IMAGE_PROMPT = "Digitise these notes.";
+// llama-server constrains Gemma's output to this schema, so the reply is always valid JSON.
+const NOTES_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    blocks: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: { enum: ["heading", "paragraph", "list", "math", "diagram"] },
+          content: { type: "string" },
+        },
+        required: ["type", "content"],
+      },
+    },
+  },
+  required: ["title", "blocks"],
+};
+
+const QUIZ_QUESTIONS = 5;
+const quizPrompt = (notes) =>
+  `You are quizzing a student on their own notes, given below. Ask exactly ${QUIZ_QUESTIONS} questions, one at a time, ` +
+  "based only on the notes, mixing recall and understanding. Number each question. After each answer, say whether it is " +
+  "correct, partly correct or wrong, explain briefly using the notes, then ask the next question. After the last answer, " +
+  `give a score out of ${QUIZ_QUESTIONS} and one study tip, then stop. Be concise. ` +
+  "Never use em dashes or en dashes, and never use emojis.\n\nNOTES:\n" + notes;
+
+const FIX_PROMPT =
+  "You fix TikZ code so it compiles. Keep the drawing the same. Reply with only the corrected complete " +
+  `tikzpicture in a \`\`\`latex code block. Only these libraries are loaded: ${TIKZ_LIBRARIES}. Never use % comments.`;
+
 const MAX_IMAGE_SIDE = 1024; // downscale uploads; the model resizes anyway and big data URLs are slow
-const MAX_FIX_ATTEMPTS = 1; // if TeX rejects the code, send the error back to Gemma this many times
+const MAX_FIX_ATTEMPTS = 1; // if TeX rejects a diagram, send the error back to Gemma this many times
 
 const state = { threads: [], activeId: null };
 
@@ -69,34 +111,44 @@ function render() {
   const thread = activeThread();
   $("threadTitle").textContent = thread.title;
   messagesEl.querySelectorAll(".msg").forEach((el) => el.remove());
-  emptyEl.hidden = thread.messages.length > 0;
-  for (const m of thread.messages) {
+  const visible = thread.messages.filter((m) => !m.hidden);
+  emptyEl.hidden = visible.length > 0;
+  for (const m of visible) {
     const el = document.createElement("div");
-    el.className = `msg ${m.role}` + (m.error ? " error" : "");
+    el.className = `msg ${m.role}` + (m.kind ? ` msg-${m.kind}` : "") + (m.error ? " error" : "");
     for (const src of m.images || []) {
       const img = document.createElement("img");
       img.src = src;
       el.appendChild(img);
     }
+    if (m.role === "user" && m.text) el.append(m.text);
     if (m.role === "assistant") {
       const body = document.createElement("div");
       body.className = "body";
-      fillBody(body, m);
+      fillBody(body, m, thread);
       el.appendChild(body);
     }
     messagesEl.appendChild(el);
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
-  updateDropzone();
+  updateComposer();
   placeLogo();
 }
 
-function updateDropzone() {
-  const busy = activeThread().busy;
-  dropzone.classList.toggle("busy", !!busy);
+// Upload row normally; the answer box while a quiz is running.
+function updateComposer() {
+  const thread = activeThread();
+  const busy = !!thread.busy;
+  const quizzing = !!thread.quiz?.active;
+  $("uploadRow").hidden = quizzing;
+  $("quizRow").hidden = !quizzing;
+  dropzone.classList.toggle("busy", busy);
+  $("cameraBtn").disabled = busy;
+  $("answerInput").disabled = busy;
+  $("answerSend").disabled = busy;
   $("dropzoneText").innerHTML = busy
-    ? "Digitising your diagram…"
-    : "<strong>Drop a hand-drawn diagram</strong> or click to browse";
+    ? "Digitising your notes…"
+    : "<strong>Drop a photo of your notes</strong> or click to browse";
 }
 
 // Centre the MLH logo over the empty-state slot, or dock it small in the header's
@@ -125,77 +177,193 @@ function placeLogo() {
   Object.assign(logo.style, { left: `${left}px`, top: `${top}px`, width: `${width}px` });
 }
 
-// Assistant message: { stage: "writing" | "rendering" | "done", tikz, svg, error }
-const STAGE_LABELS = {
-  writing: "Gemma is writing TikZ…",
-  fixing: "TeX found an error, Gemma is fixing it…",
-  rendering: "Rendering with TeX…",
-};
-function fillBody(body, m) {
+// Assistant messages come in two kinds:
+//   notes: { stage: "reading" | "typesetting" | "done", chars, notes: { title, blocks }, error }
+//   text:  { text, error }   (quiz turns)
+function fillBody(body, m, thread) {
   body.innerHTML = "";
-  if (m.svg) {
-    const figure = document.createElement("div");
-    figure.className = "diagram";
-    figure.innerHTML = m.svg; // sanitised in sanitizeSvg()
-    body.appendChild(figure);
-    body.appendChild(diagramActions(m));
+  if (m.trace?.length) body.appendChild(traceView(m));
+  if (m.kind === "text") {
+    const text = document.createElement("div");
+    body.appendChild(text);
+    body = text;
+    if (m.error) body.textContent = m.error;
+    else if (!m.text) body.innerHTML = `<span class="typing"><i></i><i></i><i></i></span>`;
+    else body.innerHTML = formatMarkdown(cleanReply(m.text));
     return;
   }
-  const status = document.createElement("div");
-  status.className = "stage";
-  if (m.error) {
-    status.classList.add("failed");
-    status.textContent = m.error;
-  } else {
-    status.innerHTML = `<span class="typing"><i></i><i></i><i></i></span>`;
-    status.append(STAGE_LABELS[m.stage] || "");
+
+  if (m.error || m.stage !== "done") {
+    const status = document.createElement("div");
+    status.className = "stage" + (m.error ? " failed" : "");
+    if (m.error) {
+      status.textContent = m.error;
+    } else {
+      status.innerHTML = `<span class="typing"><i></i><i></i><i></i></span>`;
+      status.append(
+        m.stage === "reading"
+          ? `Gemma is reading your notes… ${m.chars ? `(${m.chars} characters)` : ""}`
+          : "Typesetting maths and diagrams with TeX…",
+      );
+    }
+    body.appendChild(status);
   }
-  body.appendChild(status);
-  if (m.tikz) {
-    const pre = document.createElement("pre");
-    pre.className = "tikz-live";
-    pre.textContent = m.tikz;
-    body.appendChild(pre);
-  }
+  if (m.notes) body.appendChild(notesCard(m.notes));
+  if (m.stage === "done" && m.notes) body.appendChild(notesActions(m, thread));
 }
 
-function diagramActions(m) {
+function notesCard(notes) {
+  const card = document.createElement("article");
+  card.className = "notes";
+  const title = document.createElement("h2");
+  title.textContent = notes.title;
+  card.appendChild(title);
+  for (const block of notes.blocks) {
+    if (block.type === "heading") {
+      const h = document.createElement("h3");
+      h.innerHTML = formatInline(block.content);
+      card.appendChild(h);
+    } else if (block.type === "paragraph") {
+      const p = document.createElement("p");
+      p.innerHTML = formatInline(block.content);
+      card.appendChild(p);
+    } else if (block.type === "list") {
+      const ul = document.createElement("ul");
+      for (const item of listItems(block.content)) {
+        const li = document.createElement("li");
+        li.innerHTML = formatInline(item);
+        ul.appendChild(li);
+      }
+      card.appendChild(ul);
+    } else {
+      // math / diagram: TeX-rendered SVG, a placeholder while waiting, or the source if it failed
+      const fig = document.createElement("div");
+      fig.className = block.type === "math" ? "math-block" : "diagram";
+      if (block.svg) {
+        fig.innerHTML = block.svg; // sanitised in sanitizeSvg()
+      } else if (block.error) {
+        fig.classList.add("failed");
+        fig.innerHTML = "<p></p><pre></pre>";
+        fig.querySelector("p").textContent = block.error;
+        fig.querySelector("pre").textContent = block.content;
+      } else {
+        fig.classList.add("pending");
+        fig.textContent = block.type === "math" ? "Typesetting equation…" : "Drawing diagram…";
+      }
+      card.appendChild(fig);
+    }
+  }
+  return card;
+}
+
+function notesActions(m, thread) {
   const row = document.createElement("div");
-  row.className = "diagram-actions";
-  const button = (label, onclick) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = label;
-    b.onclick = onclick;
-    row.appendChild(b);
-    return b;
-  };
-  button("Download SVG", () => {
-    const url = URL.createObjectURL(new Blob([m.svg], { type: "image/svg+xml" }));
-    const a = Object.assign(document.createElement("a"), { href: url, download: "diagram.svg" });
-    a.click();
-    URL.revokeObjectURL(url);
-  });
-  const copy = button("Copy TikZ", async () => {
-    await navigator.clipboard.writeText(m.tikz);
+  row.className = "notes-actions";
+  if (!thread.quiz?.active) {
+    const offer = document.createElement("span");
+    offer.textContent = "Want to test yourself on these notes?";
+    const quiz = document.createElement("button");
+    quiz.type = "button";
+    quiz.className = "primary";
+    quiz.textContent = thread.quiz ? "Quiz me again" : "Quiz me";
+    quiz.onclick = () => startQuiz(thread, m.notes);
+    row.append(offer, quiz);
+  }
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy as text";
+  copy.onclick = async () => {
+    await navigator.clipboard.writeText(notesToText(m.notes));
     copy.textContent = "Copied";
-    setTimeout(() => (copy.textContent = "Copy TikZ"), 1500);
-  });
-  const details = document.createElement("details");
-  details.innerHTML = "<summary>TikZ source</summary>";
-  const pre = document.createElement("pre");
-  pre.textContent = m.tikz;
-  details.appendChild(pre);
-  row.appendChild(details);
+    setTimeout(() => (copy.textContent = "Copy as text"), 1500);
+  };
+  row.appendChild(copy);
   return row;
 }
 
-// Pull the tikzpicture out of the model's reply (it usually wraps it in a code fence).
-function extractTikz(reply) {
-  const picture = reply.match(/\begin\{tikzpicture\}[\s\S]*?\end\{tikzpicture\}/);
-  if (picture) return picture[0];
-  const fenced = reply.match(/```[\w-]*\n([\s\S]*?)```/);
-  return (fenced ? fenced[1] : reply).trim();
+const listItems = (content) =>
+  content
+    .split("\n")
+    .map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, "").trim())
+    .filter(Boolean);
+
+// Plain-text version of the notes: used for "Copy as text" and as the quiz's source material.
+function notesToText(notes) {
+  const lines = [notes.title, ""];
+  for (const b of notes.blocks) {
+    if (b.type === "heading") lines.push(`## ${b.content}`);
+    else if (b.type === "paragraph") lines.push(b.content);
+    else if (b.type === "list") lines.push(...listItems(b.content).map((i) => `- ${i}`));
+    else if (b.type === "math") lines.push(`$$ ${b.content} $$`);
+    else lines.push(`[Diagram, TikZ source]\n${b.content.slice(0, 1500)}`);
+    lines.push("");
+  }
+  return lines.join("\n").trim();
+}
+
+const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Escape text and show inline $maths$ in the Computer Modern italic font.
+function formatInline(text) {
+  return escapeHtml(text)
+    .replace(/\$([^$\n]+)\$/g, '<span class="math-inline">$1</span>')
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+}
+
+// Backstop for the quiz prompt: no em dashes or emojis, even if the model slips.
+function cleanReply(text) {
+  return text
+    .replace(/\s*—\s*/g, ", ")
+    .replace(/–/g, "-")
+    .replace(/ *[\p{Extended_Pictographic}\p{Emoji_Modifier}️‍⃣]+/gu, "");
+}
+
+// Just enough markdown for quiz replies: code blocks, inline code, bold, italics, headings.
+function formatMarkdown(text) {
+  return escapeHtml(text)
+    .split(/```[\w-]*\n?/)
+    .map((part, i) => {
+      if (i % 2) return `<pre><code>${part.replace(/\n$/, "")}</code></pre>`;
+      return part
+        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+        .replace(/^#{1,6} (.*)$/gm, "<strong>$1</strong>")
+        .replace(/^(\s*)[*-] /gm, "$1• ");
+    })
+    .join("");
+}
+
+// JSON escapes swallow some LaTeX: "\text" parses as tab + "ext", "\frac" as form feed + "rac",
+// "\beta" as backspace + "eta", "\rho" as carriage return + "ho". Put the backslashes back.
+// "\n" is only restored in maths/diagrams (e.g. "\node", "\neq"), where a real newline before
+// those letters is unlikely.
+function repairLatex(s, isCode) {
+  let out = s
+    .replace(/\t(?=[a-zA-Z])/g, "\\t")
+    .replace(/\u0008(?=[a-zA-Z])/g, "\\b")
+    .replace(/\f(?=[a-zA-Z])/g, "\\f")
+    .replace(/\r(?=[a-zA-Z])/g, "\\r");
+  if (isCode) out = out.replace(/\n(?=(?:ode|ewline|abla|eq|ot|u|i)\b|ode[\s[({])/g, "\\n");
+  return out;
+}
+
+// Clean a TikZ diagram from the model: unwrap code fences, drop % comments (which would
+// comment out the rest of a single-line snippet), and keep just the tikzpicture.
+function cleanTikz(s) {
+  const fenced = s.match(/```[\w-]*\n([\s\S]*?)```/);
+  let tikz = (fenced ? fenced[1] : s).replace(/(^|[^\\])%[^\n\\]*/g, "$1");
+  const picture = tikz.match(/\\begin\{tikzpicture\}[\s\S]*\\end\{tikzpicture\}/);
+  if (picture) tikz = picture[0];
+  else tikz = `\\begin{tikzpicture}\n${tikz}\n\\end{tikzpicture}`;
+  return tikz.trim();
+}
+
+// Displayed maths -> a tikzpicture with one node, so the same TeX renderer can typeset it.
+function mathToTikz(latex) {
+  let m = latex.trim().replace(/^\$\$?|\$\$?$/g, "").replace(/^\\\[|\\\]$/g, "").trim();
+  if (m.includes("\\\\") && !/\\begin\{/.test(m)) m = `\\begin{gathered}${m}\\end{gathered}`;
+  return `\\begin{tikzpicture}\\node {$\\displaystyle ${m}$};\\end{tikzpicture}`;
 }
 
 // The SVG comes from model-written TeX, so strip anything executable before inlining it.
@@ -212,7 +380,9 @@ function sanitizeSvg(text) {
       if (isHandler || isJsLink) el.removeAttribute(attr.name);
     }
   }
-  // Let CSS size it from the viewBox.
+  // Scale up from TeX's point size, but never past what fits.
+  const w = parseFloat(svg.getAttribute("width"));
+  if (w) svg.setAttribute("style", `max-width: min(100%, ${Math.round(w * 1.6)}px)`);
   svg.removeAttribute("width");
   svg.removeAttribute("height");
   return new XMLSerializer().serializeToString(svg);
@@ -236,7 +406,10 @@ function startRename(thread, titleEl) {
     if (done) return;
     done = true;
     const title = field.value.trim();
-    if (save && title) thread.title = title;
+    if (save && title && title !== thread.title) {
+      thread.title = title;
+      thread.autoTitle = false; // don't overwrite a name the user chose
+    }
     field.remove();
     titleEl.hidden = false;
     render();
@@ -250,44 +423,12 @@ function startRename(thread, titleEl) {
   field.onblur = () => finish(true);
 }
 
-// Each drop is handled on its own: only the latest images are sent, not the whole
-// thread, since re-encoding earlier images would make every reply slower.
-// `fix` (optional) carries a failed attempt and TeX's error so Gemma can correct it.
-function toApiMessages(images, fix) {
-  const messages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        ...images.map((url) => ({ type: "image_url", image_url: { url } })),
-        { type: "text", text: IMAGE_PROMPT },
-      ],
-    },
-  ];
-  if (fix) {
-    messages.push(
-      { role: "assistant", content: "```latex\n" + fix.tikz + "\n```" },
-      {
-        role: "user",
-        content: `That failed to compile:\n${fix.error}\nReply with the corrected complete tikzpicture only.`,
-      },
-    );
-  }
-  return messages;
-}
-
-// Streams Gemma's reply, calling onDelta with each chunk of text.
-async function streamReply(messages, onDelta) {
+// Streams a chat completion from Gemma, calling onDelta with each chunk of text.
+async function streamReply(request, onDelta) {
   const res = await fetch(`${API_BASE}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages,
-      stream: true,
-      temperature: 0.2, // code output: keep it predictable
-      max_tokens: 3072,
-      chat_template_kwargs: { enable_thinking: false },
-    }),
+    body: JSON.stringify({ stream: true, chat_template_kwargs: { enable_thinking: false }, ...request }),
   });
   if (!res.ok) throw new Error(`Model server returned ${res.status}: ${await res.text()}`);
 
@@ -311,27 +452,107 @@ async function streamReply(messages, onDelta) {
   }
 }
 
+const gemmaError = (err) =>
+  err.message.startsWith("Couldn't reach")
+    ? err.message
+    : `Couldn't reach Gemma. Is the local server running (scripts\\start.ps1)? (${err.message})${HOSTED_HINT}`;
+
 class CompileError extends Error {}
 
 // TikZ -> SVG via tikz-service. Throws CompileError when TeX rejects the code.
-async function renderTikz(tikz) {
+async function renderTikz(tikz, extra = {}) {
   let res;
   try {
     res = await fetch(`${TIKZ_BASE}/render`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tikz, tikzLibraries: TIKZ_LIBRARIES }),
+      body: JSON.stringify({ tikz, ...extra }),
     });
   } catch {
-    throw new Error(`Couldn't reach the TikZ renderer. Is it running (scripts\\start.ps1)?${HOSTED_HINT}`);
+    throw new Error(`Couldn't reach the TeX renderer. Is it running (scripts\\start.ps1)?${HOSTED_HINT}`);
   }
   const body = await res.json().catch(() => ({}));
-  if (res.status === 422) throw new CompileError(body.error || "TikZ failed to compile");
-  if (!res.ok) throw new Error(`TikZ renderer returned ${res.status}: ${body.error || ""}`);
+  if (res.status === 422) throw new CompileError(body.error || "TeX failed to compile");
+  if (!res.ok) throw new Error(`TeX renderer returned ${res.status}: ${body.error || ""}`);
   return sanitizeSvg(body.svg);
 }
 
-// Load the image files, then run them through Gemma -> TikZ -> SVG.
+// Ask Gemma (text only, no image) to fix a diagram TeX rejected.
+async function fixTikz(tikz, error) {
+  let raw = "";
+  await streamReply(
+    {
+      messages: [
+        { role: "system", content: FIX_PROMPT },
+        { role: "user", content: `This TikZ failed to compile:\n\`\`\`latex\n${tikz}\n\`\`\`\nError: ${error}` },
+      ],
+      temperature: 0.2,
+      max_tokens: 2048,
+    },
+    (d) => (raw += d),
+  );
+  return cleanTikz(raw);
+}
+
+// --- Tool-call trace: every model / renderer call is recorded on the message and shown in a
+// collapsible "Pipeline" panel, so the demo can show exactly what ran, in what order, and how long it took.
+
+const GEMMA_TOOL = "Gemma 4 E4B · llama-server :8080";
+const TEX_TOOL = "TeX (WebAssembly) · tikz-service :3001";
+
+function startStep(msg, step, update) {
+  const s = { ...step, status: "running", start: performance.now() };
+  msg.trace.push(s);
+  update?.();
+  return s;
+}
+
+function endStep(s, fields = {}, status = "ok") {
+  Object.assign(s, fields, { status, ms: performance.now() - s.start });
+}
+
+// Mark anything still running as failed (used when the pipeline throws).
+function failRunning(msg, error) {
+  for (const s of msg.trace || []) if (s.status === "running") endStep(s, { output: error }, "error");
+}
+
+// Typeset one maths/diagram block, with a Gemma fix attempt for diagrams TeX rejects.
+async function typesetBlock(block, msg, update, label) {
+  const isMath = block.type === "math";
+  for (let attempt = 0; ; attempt++) {
+    const tikz = isMath ? mathToTikz(block.content) : block.content;
+    const step = startStep(msg, { label: `Typeset ${label}`, tool: TEX_TOOL, input: tikz }, update);
+    try {
+      block.svg = await renderTikz(
+        tikz,
+        isMath ? { texPackages: MATH_PACKAGES } : { tikzLibraries: TIKZ_LIBRARIES, texPackages: MATH_PACKAGES },
+      );
+      endStep(step, { output: `SVG, ${(block.svg.length / 1024).toFixed(1)} KB` });
+      return;
+    } catch (err) {
+      endStep(step, { output: err.message }, "error");
+      if (!(err instanceof CompileError)) {
+        block.error = err.message;
+        return;
+      }
+      if (isMath || attempt >= MAX_FIX_ATTEMPTS) {
+        block.error = isMath ? "Couldn't typeset this equation, showing the LaTeX:" : "Couldn't draw this diagram, showing the TikZ:";
+        return;
+      }
+      const fix = startStep(msg, { label: `Fix ${label} after TeX error`, tool: GEMMA_TOOL, input: err.message }, update);
+      try {
+        block.content = await fixTikz(block.content, err.message);
+        endStep(fix, { output: block.content });
+      } catch (fixErr) {
+        endStep(fix, { output: fixErr.message }, "error");
+        block.error = gemmaError(fixErr);
+        return;
+      }
+    }
+  }
+}
+
+// Load the image files, then: Gemma OCR -> JSON notes -> TeX for maths and diagrams.
 async function sendFiles(fileList) {
   const thread = activeThread();
   const files = [...fileList].filter((f) => f.type.startsWith("image/"));
@@ -347,55 +568,215 @@ async function sendFiles(fileList) {
   }
   if (!images.length) return;
 
+  if (thread.quiz) thread.quiz.active = false; // new notes end any running quiz
   thread.messages.push({ role: "user", images });
   if (thread.title === "New thread") {
-    const name = files[0].name.replace(/\.[^.]+$/, "") || "Diagram";
+    const name = files[0].name.replace(/\.[^.]+$/, "") || "Notes";
     thread.title = files.length > 1 ? `${name} +${files.length - 1}` : name;
+    thread.autoTitle = true;
   }
 
-  const reply = { role: "assistant", stage: "writing", tikz: "" };
+  const reply = { role: "assistant", kind: "notes", stage: "reading", chars: 0, trace: [] };
   thread.messages.push(reply);
   thread.busy = true;
   render();
+  const update = bubbleUpdater(thread, reply);
 
-  // Update only the reply bubble while working, unless the user switched threads.
-  const updateBubble = () => {
+  try {
+    let raw = "";
+    const ocr = startStep(
+      reply,
+      {
+        label: "Read the notes (vision OCR → JSON)",
+        tool: GEMMA_TOOL,
+        input: `${images.length} image${images.length > 1 ? "s" : ""}, output constrained to the notes JSON schema\n\nSystem prompt:\n${NOTES_PROMPT}`,
+      },
+      update,
+    );
+    await streamReply(
+      {
+        messages: [
+          { role: "system", content: NOTES_PROMPT },
+          {
+            role: "user",
+            content: [
+              ...images.map((url) => ({ type: "image_url", image_url: { url } })),
+              { type: "text", text: NOTES_IMAGE_PROMPT },
+            ],
+          },
+        ],
+        response_format: { type: "json_schema", json_schema: { name: "notes", schema: NOTES_SCHEMA } },
+        temperature: 0.2,
+        max_tokens: 4096,
+      },
+      (delta) => {
+        raw += delta;
+        reply.chars = raw.length;
+        ocr.output = raw;
+        update();
+      },
+    );
+    endStep(ocr, { output: raw });
+
+    const parse = startStep(reply, { label: "Parse JSON and split text from maths/diagrams", tool: "Browser", input: `${raw.length} characters of JSON` });
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("Gemma's reply was cut off before the notes were complete. Try a clearer or smaller photo.");
+    }
+    const blocks = (parsed.blocks || [])
+      .filter((b) => b && typeof b.content === "string" && b.content.trim())
+      .map((b) => {
+        const isCode = b.type === "math" || b.type === "diagram";
+        const content = repairLatex(b.content, isCode);
+        return { type: b.type, content: b.type === "diagram" ? cleanTikz(content) : content };
+      });
+    const counts = {};
+    for (const b of blocks) counts[b.type] = (counts[b.type] || 0) + 1;
+    endStep(parse, { output: Object.entries(counts).map(([t, n]) => `${n} ${t}`).join(", ") || "no content found" });
+
+    reply.notes = { title: repairLatex(parsed.title || "Notes", false), blocks };
+    if (thread.autoTitle && parsed.title) thread.title = reply.notes.title;
+    reply.stage = "typesetting";
+    render();
+
+    // tikz-service renders one at a time anyway, so go in order and show each as it lands.
+    const toTypeset = blocks.filter((b) => b.type === "math" || b.type === "diagram");
+    const seen = { math: 0, diagram: 0 };
+    for (const block of toTypeset) {
+      const n = ++seen[block.type];
+      await typesetBlock(block, reply, update, `${block.type === "math" ? "equation" : "diagram"} ${n}`);
+      update();
+    }
+    reply.stage = "done";
+  } catch (err) {
+    reply.error = gemmaError(err);
+    failRunning(reply, err.message);
+  }
+  thread.busy = false;
+  render();
+}
+
+// Re-render just the message being worked on, unless the user switched threads.
+function bubbleUpdater(thread, msg) {
+  return () => {
     if (state.activeId !== thread.id) return;
-    const body = messagesEl.querySelector(".msg:last-of-type .body");
-    if (body) fillBody(body, reply);
+    const el = messagesEl.querySelector(".msg:last-of-type .body");
+    if (el) fillBody(el, msg, thread);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   };
+}
 
-  let fix = null;
-  try {
-    for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-      reply.stage = fix ? "fixing" : "writing";
-      let raw = "";
-      reply.tikz = "";
-      updateBubble();
-      await streamReply(toApiMessages(images, fix), (delta) => {
-        raw += delta;
-        reply.tikz = raw;
-        updateBubble();
-      });
-      reply.tikz = extractTikz(raw);
-      reply.stage = "rendering";
-      updateBubble();
-      try {
-        reply.svg = await renderTikz(reply.tikz);
-        break;
-      } catch (err) {
-        if (!(err instanceof CompileError) || attempt === MAX_FIX_ATTEMPTS) throw err;
-        fix = { tikz: reply.tikz, error: err.message };
-      }
+// Collapsible list of the tool calls behind a message. Open/closed state is stored on the
+// message and steps, because the bubble is rebuilt on every streamed token.
+function traceView(m) {
+  const total = m.trace.reduce((sum, s) => sum + (s.ms || 0), 0);
+  const running = m.trace.find((s) => s.status === "running");
+  const failed = m.trace.some((s) => s.status === "error");
+  const panel = document.createElement("details");
+  panel.className = "trace";
+  panel.open = !!m.traceOpen;
+  panel.ontoggle = () => (m.traceOpen = panel.open);
+  const summary = document.createElement("summary");
+  summary.innerHTML = `<span class="trace-title">Pipeline</span>`;
+  summary.append(
+    ` ${m.trace.length} tool call${m.trace.length === 1 ? "" : "s"}` +
+      (running ? ` · running: ${running.label}` : ` · ${(total / 1000).toFixed(1)} s`) +
+      (failed && !running ? " · with errors" : ""),
+  );
+  panel.appendChild(summary);
+
+  const list = document.createElement("ol");
+  m.trace.forEach((s, i) => {
+    const li = document.createElement("li");
+    li.className = `step ${s.status}`;
+    const d = document.createElement("details");
+    d.open = !!s.open;
+    d.ontoggle = () => (s.open = d.open);
+    const sum = document.createElement("summary");
+    sum.innerHTML = `<span class="step-dot"></span><span class="step-num">${i + 1}</span><span class="step-label"></span><span class="step-tool"></span><span class="step-time"></span>`;
+    sum.querySelector(".step-label").textContent = s.label;
+    sum.querySelector(".step-tool").textContent = s.tool;
+    sum.querySelector(".step-time").textContent =
+      s.status === "running" ? "running…" : `${s.ms < 1000 ? Math.round(s.ms) + " ms" : (s.ms / 1000).toFixed(1) + " s"}`;
+    d.appendChild(sum);
+    for (const [name, value] of [["Input", s.input], ["Output", s.output]]) {
+      if (!value) continue;
+      const h = document.createElement("div");
+      h.className = "step-io";
+      h.textContent = name;
+      const pre = document.createElement("pre");
+      pre.textContent = value.length > 6000 ? value.slice(0, 6000) + "\n…" : value;
+      d.append(h, pre);
     }
+    li.appendChild(d);
+    list.appendChild(li);
+  });
+  panel.appendChild(list);
+  return panel;
+}
+
+// --- Quiz: a text conversation grounded in the notes ---
+
+function startQuiz(thread, notes) {
+  if (thread.busy) return;
+  thread.quiz = { active: true, notesText: notesToText(notes) };
+  // Quiz turns are tagged so only they are sent as history; the opener stays hidden.
+  thread.messages.push({ role: "user", text: "Start the quiz.", quiz: true, hidden: true });
+  quizTurn(thread);
+}
+
+function endQuiz(thread) {
+  if (thread.quiz) thread.quiz.active = false;
+  render();
+}
+
+async function sendAnswer() {
+  const thread = activeThread();
+  const text = $("answerInput").value.trim();
+  if (!text || thread.busy || !thread.quiz?.active) return;
+  $("answerInput").value = "";
+  thread.messages.push({ role: "user", text, quiz: true });
+  await quizTurn(thread);
+  $("answerInput").focus();
+}
+
+async function quizTurn(thread) {
+  const history = thread.messages
+    .filter((m) => m.quiz && !m.error && m.text)
+    .map((m) => ({ role: m.role, content: m.text }));
+  const reply = { role: "assistant", kind: "text", text: "", quiz: true, trace: [] };
+  thread.messages.push(reply);
+  thread.busy = true;
+  render();
+  const update = bubbleUpdater(thread, reply);
+  const lastUser = history[history.length - 1]?.content || "";
+  const step = startStep(
+    reply,
+    {
+      label: history.length <= 1 ? "Write the first quiz question" : "Mark the answer and ask the next question",
+      tool: GEMMA_TOOL,
+      input: `${history.length} quiz message${history.length === 1 ? "" : "s"} + the notes as context\n\nLatest: ${lastUser}`,
+    },
+    update,
+  );
+  try {
+    await streamReply(
+      {
+        messages: [{ role: "system", content: quizPrompt(thread.quiz.notesText) }, ...history],
+        temperature: 0.5,
+        max_tokens: 1024,
+      },
+      (delta) => {
+        reply.text += delta;
+        update();
+      },
+    );
+    endStep(step, { output: reply.text });
   } catch (err) {
-    reply.error =
-      err instanceof CompileError
-        ? `TeX couldn't compile Gemma's TikZ: ${err.message}`
-        : err.message.startsWith("Couldn't reach")
-          ? err.message
-          : `Couldn't reach Gemma. Is the local server running (scripts\\start.ps1)? (${err.message})${HOSTED_HINT}`;
+    reply.error = gemmaError(err);
+    failRunning(reply, err.message);
   }
   thread.busy = false;
   render();
@@ -458,12 +839,88 @@ chatEl.addEventListener("drop", (e) => {
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());
 
+// Camera: live preview in a dialog, capture a frame and send it like a dropped file.
+// getUserMedia needs a secure context; http://127.0.0.1 counts, so this works offline.
+const camera = { stream: null, devices: [], index: 0 };
+const cameraDialog = $("cameraDialog");
+const cameraVideo = $("cameraVideo");
+
+async function startCamera() {
+  stopCamera();
+  $("cameraError").hidden = true;
+  const device = camera.devices[camera.index];
+  try {
+    camera.stream = await navigator.mediaDevices.getUserMedia({
+      video: device
+        ? { deviceId: { exact: device.deviceId }, width: { ideal: 1920 } }
+        : { facingMode: { ideal: "environment" }, width: { ideal: 1920 } }, // rear camera on phones
+    });
+    cameraVideo.srcObject = camera.stream;
+    // Labels/IDs are only listed after permission is granted.
+    camera.devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    $("cameraSwitch").hidden = camera.devices.length < 2;
+  } catch (err) {
+    const denied = err.name === "NotAllowedError";
+    $("cameraError").textContent = denied
+      ? "Camera access was blocked. Allow it in the browser's address bar and try again."
+      : `Couldn't start the camera: ${err.message}`;
+    $("cameraError").hidden = false;
+  }
+}
+
+function stopCamera() {
+  camera.stream?.getTracks().forEach((t) => t.stop());
+  camera.stream = null;
+  cameraVideo.srcObject = null;
+}
+
+$("cameraBtn").onclick = () => {
+  if (activeThread().busy) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    alert(`The camera needs the page opened at ${LLAMA_URL} (or another secure address).`);
+    return;
+  }
+  cameraDialog.showModal();
+  startCamera();
+};
+$("cameraSwitch").onclick = () => {
+  camera.index = (camera.index + 1) % camera.devices.length;
+  startCamera();
+};
+$("cameraCancel").onclick = () => cameraDialog.close();
+cameraDialog.addEventListener("close", stopCamera); // also covers Escape
+$("cameraCapture").onclick = () => {
+  if (!camera.stream || !cameraVideo.videoWidth) return;
+  const canvas = document.createElement("canvas");
+  canvas.width = cameraVideo.videoWidth;
+  canvas.height = cameraVideo.videoHeight;
+  canvas.getContext("2d").drawImage(cameraVideo, 0, 0);
+  canvas.toBlob((blob) => {
+    cameraDialog.close();
+    const time = new Date().toTimeString().slice(0, 5).replace(":", "");
+    sendFiles([new File([blob], `camera-${time}.jpg`, { type: "image/jpeg" })]);
+  }, "image/jpeg", 0.92);
+};
+
 // Ctrl+V a copied image or screenshot.
 window.addEventListener("paste", (e) => {
-  if (e.target.closest?.("input")) return;
+  if (e.target.closest?.("input, textarea")) return;
   const files = [...(e.clipboardData?.files || [])];
   if (files.length) sendFiles(files);
 });
+
+// Quiz answers: Enter sends, Shift+Enter for a new line.
+$("quizRow").onsubmit = (e) => {
+  e.preventDefault();
+  sendAnswer();
+};
+$("answerInput").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendAnswer();
+  }
+};
+$("endQuiz").onclick = () => endQuiz(activeThread());
 
 $("newThread").onclick = newThread;
 $("menuBtn").onclick = () => $("sidebar").classList.toggle("open");

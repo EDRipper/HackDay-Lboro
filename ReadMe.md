@@ -1,28 +1,36 @@
 *MLH Lboro Digitech Hackathon Project*
 
-Drop a photo of a hand-drawn diagram, get a clean digital version back. Runs entirely on the laptop and works in airplane mode.
+Upload (or photograph) your handwritten notes and get them back clean and typeset, then get quizzed on them. Everything runs on the laptop and works in airplane mode.
 
 ```
-photo ──► Gemma 4 E4B (llama-server, vision) ──► TikZ code ──► tikz-service (TeX in WebAssembly) ──► SVG
+photo ─► Gemma 4 E4B (vision OCR, llama-server) ─► JSON: headings, text, lists, maths, diagrams
+                                                      │
+                     maths + TikZ diagrams ─► tikz-service (TeX in WebAssembly) ─► SVG
+                                                      │
+                                     clean notes ─► "Quiz me" ─► Gemma asks, you type answers, Gemma marks
 ```
 
-If TeX can't compile Gemma's TikZ, the error is sent back to Gemma for one fix attempt.
+- Gemma's output is constrained to a JSON schema by llama-server, so it always parses.
+- If TeX rejects a diagram, the error goes back to Gemma for one fix attempt.
+- Every reply has a collapsible **Pipeline** panel showing each tool call, its timing, input and output.
 
 ## Run it
 
-Needs Node.js. On Windows:
+Needs Node.js. On Windows, once, with internet:
 
 ```powershell
-# Once, with internet: downloads llama.cpp + Gemma weights (~5.6 GB, gitignored) and installs tikz-service
+# downloads llama.cpp + Gemma weights (~5.6 GB, gitignored) and installs tikz-service
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
-
-# Every time (offline is fine): starts tikz-service on :3001 and Gemma + the UI on :8080
-powershell -ExecutionPolicy Bypass -File scripts\start.ps1
+# puts a "HackDay Notes" shortcut (Lboro crest icon) on the desktop
+powershell -ExecutionPolicy Bypass -File scripts\make-shortcut.ps1
 ```
 
-Then open http://127.0.0.1:8080.
+Then double-click **HackDay Notes** on the desktop (or run `scripts\launch.bat`). It starts Gemma and the TeX renderer in a minimised window and opens the app once they're ready (about 10-20 s). Close the "HackDay Notes - servers" window to shut everything down.
 
-- `start.ps1 -GpuLayers 0` forces CPU only.
-- Fonts (Nunito Sans, IBM Plex Mono, Computer Modern for the TeX output) and logos are bundled in `web/assets`, so nothing is fetched from the internet.
-- The prompts live at the top of `web/app.js` (`SYSTEM_PROMPT`, `IMAGE_PROMPT`).
+Manual start: `scripts\start.ps1`, then open http://127.0.0.1:8080. `start.ps1 -GpuLayers 0` forces CPU only.
+
+## Notes
+
+- Fonts (Nunito Sans, IBM Plex Mono, Computer Modern for TeX output), logos and the icon are bundled in `web/assets`, so nothing is fetched from the internet.
+- Prompts and the JSON schema live at the top of `web/app.js`.
 - See `tikz-service/README.md` for the renderer API.

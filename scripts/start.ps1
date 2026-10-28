@@ -25,6 +25,7 @@ try {
         --path (Join-Path $root "web") `
         --host 127.0.0.1 --port $Port `
         -c $Context -ngl $GpuLayers `
+        --parallel 1 `
         --jinja
 } finally {
     if (-not $tikz.HasExited) { Stop-Process -Id $tikz.Id -Force }
