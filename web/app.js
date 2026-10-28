@@ -29,8 +29,12 @@ const NOTES_PROMPT =
   `For diagrams use standard TikZ plus only these libraries, which are already loaded: ${TIKZ_LIBRARIES}. ` +
   "Draw each labelled shape as a named \\node (e.g. \\node[draw, circle] (sun) {Sun};), place nodes with " +
   "positioning (right=2cm of sun), and connect them with arrows between node names, e.g. \\draw[->] (sun) -- (leaf); " +
-  "so lines never cross labels. Use plain outlines, no fill colours. " +
-  "Never use % comments, \\documentclass, \\usepackage or \\usetikzlibrary. " +
+  "so lines never cross labels. Use plain black outlines, no fill colours. " +
+  "circuitikz is NOT available: draw circuit components from plain shapes (a small rectangle for a resistor, " +
+  "two short parallel lines for a battery, filled dots for nodes, straight lines for wires) and label them with nodes. " +
+  "Use only ASCII characters: write symbols as LaTeX (\\Omega, ^\\circ, \\mu, \\rightarrow), never as Unicode. " +
+  "Never use % comments, \\documentclass, \\usepackage, \\usetikzlibrary, align or equation environments, " +
+  "\\ce, \\SI or \\si. " +
   'Set "title" to a short title for the page.';
 const NOTES_IMAGE_PROMPT = "Digitise these notes.";
 // llama-server constrains Gemma's output to this schema, so the reply is always valid JSON.
@@ -62,8 +66,14 @@ const quizPrompt = (notes) =>
   "Never use em dashes or en dashes, and never use emojis.\n\nNOTES:\n" + notes;
 
 const FIX_PROMPT =
-  "You fix TikZ code so it compiles. Keep the drawing the same. Reply with only the corrected complete " +
-  `tikzpicture in a \`\`\`latex code block. Only these libraries are loaded: ${TIKZ_LIBRARIES}. Never use % comments.`;
+  "You fix TikZ code so it compiles and draws visibly. Keep the drawing the same. Reply with only the corrected complete " +
+  `tikzpicture in a \`\`\`latex code block. Only these libraries are loaded: ${TIKZ_LIBRARIES}. ` +
+  "circuitikz is not available, so draw components from plain shapes. Use black lines, only ASCII characters, " +
+  "and never % comments.";
+const MATH_FIX_PROMPT =
+  "You fix a LaTeX maths expression so it compiles inside $\\displaystyle ...$ with only amsmath and amssymb. " +
+  "Keep the meaning the same. Use only ASCII (\\rightarrow, ^2, \\Omega, ^\\circ), no align/equation environments " +
+  "(use aligned), no \\ce, \\SI or \\si. Reply with only the corrected expression, no $ signs, no explanation.";
 
 const MAX_IMAGE_SIDE = 1024; // downscale uploads; the model resizes anyway and big data URLs are slow
 const MAX_FIX_ATTEMPTS = 1; // if TeX rejects a diagram, send the error back to Gemma this many times
@@ -356,12 +366,63 @@ function cleanTikz(s) {
   const picture = tikz.match(/\\begin\{tikzpicture\}[\s\S]*\\end\{tikzpicture\}/);
   if (picture) tikz = picture[0];
   else tikz = `\\begin{tikzpicture}\n${tikz}\n\\end{tikzpicture}`;
-  return tikz.trim();
+  return texSafe(tikz.trim(), "text");
+}
+
+// The WebAssembly TeX only knows ASCII and a few packages, so translate what the model
+// commonly writes instead. `mode` is "math" (inside $...$) or "text" (TikZ code / node labels).
+const UNICODE_TO_LATEX = {
+  "→": "\\rightarrow", "←": "\\leftarrow", "↔": "\\leftrightarrow", "⇒": "\\Rightarrow", "⇐": "\\Leftarrow",
+  "⇔": "\\Leftrightarrow", "⇌": "\\rightleftharpoons", "↑": "\\uparrow", "↓": "\\downarrow",
+  "≤": "\\leq", "≥": "\\geq", "≠": "\\neq", "≈": "\\approx", "≡": "\\equiv", "∝": "\\propto", "∼": "\\sim",
+  "×": "\\times", "÷": "\\div", "±": "\\pm", "∓": "\\mp", "·": "\\cdot", "•": "\\cdot", "−": "-", "–": "-", "—": "-",
+  "∞": "\\infty", "√": "\\sqrt", "∑": "\\sum", "∏": "\\prod", "∫": "\\int", "∂": "\\partial", "∇": "\\nabla",
+  "∈": "\\in", "∉": "\\notin", "⊂": "\\subset", "∪": "\\cup", "∩": "\\cap", "∀": "\\forall", "∃": "\\exists",
+  "°": "^\\circ", "′": "'", "″": "''", "…": "\\ldots", "Ω": "\\Omega", "µ": "\\mu", "℃": "^\\circ C",
+  "α": "\\alpha", "β": "\\beta", "γ": "\\gamma", "δ": "\\delta", "ε": "\\epsilon", "ζ": "\\zeta", "η": "\\eta",
+  "θ": "\\theta", "ι": "\\iota", "κ": "\\kappa", "λ": "\\lambda", "μ": "\\mu", "ν": "\\nu", "ξ": "\\xi",
+  "π": "\\pi", "ρ": "\\rho", "σ": "\\sigma", "τ": "\\tau", "υ": "\\upsilon", "φ": "\\phi", "χ": "\\chi",
+  "ψ": "\\psi", "ω": "\\omega", "Γ": "\\Gamma", "Δ": "\\Delta", "∆": "\\Delta", "Θ": "\\Theta", "Λ": "\\Lambda",
+  "Ξ": "\\Xi", "Π": "\\Pi", "Σ": "\\Sigma", "Φ": "\\Phi", "Ψ": "\\Psi",
+  "½": "\\tfrac{1}{2}", "¼": "\\tfrac{1}{4}", "¾": "\\tfrac{3}{4}",
+};
+const SUPERSCRIPTS = { "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁺": "+", "⁻": "-", "ⁿ": "n" };
+const SUBSCRIPTS = { "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4", "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9", "₊": "+", "₋": "-" };
+
+function texSafe(s, mode) {
+  const inMath = (latex) => (mode === "math" ? latex : `$${latex}$`);
+  let out = s
+    // runs of super/subscript digits: x²³ -> x^{23}
+    .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻ⁿ]+/g, (r) => inMath(`^{${[...r].map((c) => SUPERSCRIPTS[c]).join("")}}`))
+    .replace(/[₀₁₂₃₄₅₆₇₈₉₊₋]+/g, (r) => inMath(`_{${[...r].map((c) => SUBSCRIPTS[c]).join("")}}`))
+    .replace(/[^\x00-\x7F]/g, (c) => {
+      const latex = UNICODE_TO_LATEX[c];
+      if (!latex) return c;
+      if (latex === "-" || latex === "'" || latex === "''") return latex;
+      return inMath(latex + (/[a-zA-Z]$/.test(latex) ? " " : ""));
+    })
+    // packages the renderer doesn't have
+    .replace(/\\ce\{([^{}]*)\}/g, (_, f) => `\\mathrm{${f.replace(/(\d+)/g, "_{$1}")}}`)
+    .replace(/\\SI\{([^{}]*)\}\{([^{}]*)\}/g, "$1\\,\\mathrm{$2}")
+    .replace(/\\si\{([^{}]*)\}/g, "\\mathrm{$1}")
+    .replace(/\\degree\b/g, "^\\circ")
+    .replace(/\\celsius\b/g, "^\\circ\\mathrm{C}")
+    .replace(/\\ohm\b/g, "\\Omega")
+    .replace(/\\label\{[^{}]*\}|\\tag\{[^{}]*\}|\\nonumber/g, "");
+  if (mode === "math") {
+    // display environments can't sit inside $...$; use the inline-friendly versions
+    out = out
+      .replace(/\\(begin|end)\{(equation|displaymath)\*?\}/g, "")
+      .replace(/\\(begin|end)\{(align|eqnarray|flalign)\*?\}/g, "\\$1{aligned}")
+      .replace(/\\(begin|end)\{(gather|multline)\*?\}/g, "\\$1{gathered}");
+  }
+  // anything still non-ASCII: drop accents (é -> e), otherwise replace with ?
+  return out.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\x00-\x7F]/g, "?");
 }
 
 // Displayed maths -> a tikzpicture with one node, so the same TeX renderer can typeset it.
 function mathToTikz(latex) {
-  let m = latex.trim().replace(/^\$\$?|\$\$?$/g, "").replace(/^\\\[|\\\]$/g, "").trim();
+  let m = texSafe(latex.trim(), "math").replace(/^\$\$?|\$\$?$/g, "").replace(/^\\\[|\\\]$/g, "").trim();
   if (m.includes("\\\\") && !/\\begin\{/.test(m)) m = `\\begin{gathered}${m}\\end{gathered}`;
   return `\\begin{tikzpicture}\\node {$\\displaystyle ${m}$};\\end{tikzpicture}`;
 }
@@ -379,6 +440,18 @@ function sanitizeSvg(text) {
       const isJsLink = /href$/i.test(attr.name) && /^\s*javascript:/i.test(attr.value);
       if (isHandler || isJsLink) el.removeAttribute(attr.name);
     }
+  }
+  // A diagram can compile yet draw nothing (e.g. everything in white, or zero size): treat as a failure.
+  const vb = (svg.getAttribute("viewBox") || "").split(/[\s,]+/).map(Number);
+  const blank = (v) => /^(none|white|#fff|#ffffff|transparent)$/i.test(v || "");
+  const marks = [...svg.querySelectorAll("path, use, line, rect, circle, ellipse, polygon, polyline, text")].filter((el) => {
+    const stroke = el.getAttribute("stroke");
+    const fill = el.getAttribute("fill");
+    // SVG defaults: no stroke, black fill (groups usually set the colours, so missing attrs count as visible)
+    return (stroke && !blank(stroke)) || !fill || !blank(fill);
+  });
+  if (!marks.length || (vb.length === 4 && (vb[2] < 2 || vb[3] < 2))) {
+    throw new CompileError("TeX produced an empty picture (nothing visible was drawn)");
   }
   // Scale up from TeX's point size, but never past what fits.
   const w = parseFloat(svg.getAttribute("width"));
@@ -494,6 +567,24 @@ async function fixTikz(tikz, error) {
   return cleanTikz(raw);
 }
 
+// Same idea for an equation TeX rejected.
+async function fixMath(latex, error) {
+  let raw = "";
+  await streamReply(
+    {
+      messages: [
+        { role: "system", content: MATH_FIX_PROMPT },
+        { role: "user", content: `This failed to compile:\n${latex}\nError: ${error}` },
+      ],
+      temperature: 0.2,
+      max_tokens: 512,
+    },
+    (d) => (raw += d),
+  );
+  const fenced = raw.match(/```[\w-]*\n([\s\S]*?)```/);
+  return (fenced ? fenced[1] : raw).trim();
+}
+
 // --- Tool-call trace: every model / renderer call is recorded on the message and shown in a
 // collapsible "Pipeline" panel, so the demo can show exactly what ran, in what order, and how long it took.
 
@@ -516,7 +607,7 @@ function failRunning(msg, error) {
   for (const s of msg.trace || []) if (s.status === "running") endStep(s, { output: error }, "error");
 }
 
-// Typeset one maths/diagram block, with a Gemma fix attempt for diagrams TeX rejects.
+// Typeset one maths/diagram block, with a Gemma fix attempt when TeX rejects it.
 async function typesetBlock(block, msg, update, label) {
   const isMath = block.type === "math";
   for (let attempt = 0; ; attempt++) {
@@ -535,13 +626,13 @@ async function typesetBlock(block, msg, update, label) {
         block.error = err.message;
         return;
       }
-      if (isMath || attempt >= MAX_FIX_ATTEMPTS) {
+      if (attempt >= MAX_FIX_ATTEMPTS) {
         block.error = isMath ? "Couldn't typeset this equation, showing the LaTeX:" : "Couldn't draw this diagram, showing the TikZ:";
         return;
       }
       const fix = startStep(msg, { label: `Fix ${label} after TeX error`, tool: GEMMA_TOOL, input: err.message }, update);
       try {
-        block.content = await fixTikz(block.content, err.message);
+        block.content = isMath ? await fixMath(block.content, err.message) : await fixTikz(block.content, err.message);
         endStep(fix, { output: block.content });
       } catch (fixErr) {
         endStep(fix, { output: fixErr.message }, "error");

@@ -17,7 +17,9 @@ $tikzDir = Join-Path $root "tikz-service"
 if (-not (Test-Path (Join-Path $tikzDir "node_modules"))) { throw "tikz-service not installed - run scripts\setup.ps1 first" }
 
 $env:PORT = $TikzPort
-$tikz = Start-Process node -ArgumentList "src/server.js" -WorkingDirectory $tikzDir -NoNewWindow -PassThru
+# Keep the TeX renderer alive: if it ever exits, restart it a second later instead of breaking the demo.
+$tikzLoop = 'while ($true) { node src/server.js; Write-Host "tikz-service exited, restarting..."; Start-Sleep 1 }'
+$tikz = Start-Process powershell -ArgumentList "-NoProfile", "-Command", $tikzLoop -WorkingDirectory $tikzDir -NoNewWindow -PassThru
 try {
     & $server.FullName `
         -m (Join-Path $root "models\$ModelFile") `
@@ -28,5 +30,6 @@ try {
         --parallel 1 `
         --jinja
 } finally {
-    if (-not $tikz.HasExited) { Stop-Process -Id $tikz.Id -Force }
+    # /T also stops the node process the restart loop started
+    if (-not $tikz.HasExited) { taskkill /PID $tikz.Id /T /F | Out-Null }
 }
